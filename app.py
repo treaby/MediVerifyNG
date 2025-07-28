@@ -3,6 +3,17 @@ import pandas as pd
 import openai
 from dotenv import load_dotenv
 import os
+import traceback
+import sys
+
+print("DEBUG: App starting—before Streamlit import")
+try:
+    import streamlit as st
+    st.write("DEBUG: Streamlit import success")
+except Exception as e:
+    print("ERROR: Streamlit import failed")
+    traceback.print_exc(file=sys.stdout)
+    sys.exit(1)
 
 # Load environment variables
 load_dotenv()
