@@ -1,0 +1,4 @@
+drug_name,manufacturer,nafdac_number,status
+Panadol,GSK,04-0766,Verified
+Amoxil,GSK,04-1056,Verified
+FakeMed,Unknown,00-0000,Unverified
