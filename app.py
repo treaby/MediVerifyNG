@@ -1,79 +1,115 @@
 import streamlit as st
 import pandas as pd
-import openai
-from dotenv import load_dotenv
+from datetime import datetime
 import os
-import traceback
-import sys
+import sqlite3
+from fuzzywuzzy import fuzz
+from fuzzywuzzy import process
 
-print("DEBUG: App starting—before Streamlit import")
-try:
-    import streamlit as st
-    st.write("DEBUG: Streamlit import success")
-except Exception as e:
-    print("ERROR: Streamlit import failed")
-    traceback.print_exc(file=sys.stdout)
-    sys.exit(1)
+# --- CONFIGURATION --- #
+DATABASE_NAME = 'mediverify.db'
+DRUGS_CSV_PATH = 'data/drugs.csv'
 
-# Load environment variables
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# --- DATABASE SETUP --- #
+def init_db():
+    with sqlite3.connect(DATABASE_NAME) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nafdac_number TEXT NOT NULL,
+                reason TEXT,
+                contact TEXT,
+                timestamp TEXT
+            )
+        ''')
+        conn.commit()
 
-# Load drug database
+# --- DATA LOADING --- #
 @st.cache_data
-def load_drug_data():
-    return pd.read_csv("data/drugs.csv")
+def load_drug_data(file_path):
+    try:
+        df = pd.read_csv(file_path)
+        df['nafdac_number'] = df['nafdac_number'].astype(str).str.strip().str.upper()
+        return df
+    except FileNotFoundError:
+        st.error(f"❌ '{file_path}' not found.")
+        st.stop()
+    except Exception as e:
+        st.error(f"❌ Failed loading drug data: {e}")
+        st.stop()
 
-df = load_drug_data()
+# --- UI LAYOUT --- #
+st.set_page_config(page_title="MediVerifyNG", page_icon="💊", layout="centered")
 
-# Streamlit UI
-st.title("💊 MediVerifyNG - AI Drug Verification App")
-st.write("Instantly verify the authenticity of drugs using AI.")
+st.markdown("""
+<div style='text-align:center;'>
+    <h1 style='color:#0066CC;'>💊 MediVerifyNG</h1>
+    <p style='font-size:18px;'>Verify a drug by NAFDAC number and report suspicious entries.</p>
+</div>
+""", unsafe_allow_html=True)
 
-# User inputs
-drug_name = st.text_input("Drug Name:")
-manufacturer = st.text_input("Manufacturer:")
-nafdac_number = st.text_input("NAFDAC Number:")
+# --- INIT APP --- #
+init_db()
+df_drugs = load_drug_data(DRUGS_CSV_PATH)
 
-if st.button("Verify Drug"):
-    if not drug_name or not manufacturer or not nafdac_number:
-        st.warning("Please fill in all fields.")
+# --- FORM INPUT --- #
+with st.form("verify_form"):
+    nafdac_input = st.text_input("🔎 Enter NAFDAC Number").strip().upper()
+    submitted = st.form_submit_button("Verify Drug")
+
+# --- LOGIC --- #
+if submitted and nafdac_input:
+    match = df_drugs[df_drugs["nafdac_number"] == nafdac_input]
+
+    if not match.empty:
+        drug = match.iloc[0]
+        status = str(drug['status']).strip().upper()
+
+        if status == 'VERIFIED':
+            st.success("✅ Drug Verified Successfully")
+            st.markdown(f"""
+            <div style='background-color:#F0F8FF;padding:15px;border-radius:10px;'>
+                <h4>🧪 Drug Details</h4>
+                <ul>
+                    <li><strong>Name:</strong> {drug['drug_name']}</li>
+                    <li><strong>Manufacturer:</strong> {drug['manufacturer']}</li>
+                    <li><strong>NAFDAC No:</strong> {drug['nafdac_number']}</li>
+                    <li><strong>Status:</strong> {drug['status']}</li>
+                </ul>
+                <p>✅ This drug has been <strong>verified</strong> by NAFDAC.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.error(f"❌ Drug Not Verified – Status: {status}")
+            st.warning("⚠️ This drug is *not verified* by NAFDAC.")
     else:
-        # Search in local dataset
-        match = df[
-            (df['drug_name'].str.lower() == drug_name.lower()) &
-            (df['manufacturer'].str.lower() == manufacturer.lower()) &
-            (df['nafdac_number'] == nafdac_number)
-        ]
+        st.error("❌ Drug Not Verified – NAFDAC Number Not Found.")
+        st.warning("⚠️ This drug has been *unverified* by NAFDAC.")
 
-        # Prepare prompt for OpenAI
-        records = df.to_dict(orient='records')
-        prompt = f"""
-You are an AI drug verification assistant.
+        # --- FUZZY SUGGESTIONS --- #
+        all_nafdac = df_drugs['nafdac_number'].tolist()
+        suggestions = process.extract(nafdac_input, all_nafdac, scorer=fuzz.ratio, limit=5)
+        matches = [s[0] for s in suggestions if s[1] > 80]
 
-Check if this drug:
-- Name: {drug_name}
-- Manufacturer: {manufacturer}
-- NAFDAC Number: {nafdac_number}
+        if matches:
+            st.info("💡 Did you mean:")
+            for m in matches:
+                st.write(f"🔹 {m}")
 
-...matches any of these known verified drugs:
+    # --- REPORT FORM --- #
+    with st.expander("📢 Report This Drug"):
+        reason = st.text_area("📝 Why do you think this is fake?")
+        contact = st.text_input("📞 (Optional) Contact Info")
 
-{records}
-
-If found, respond ✅ Verified + reason.
-If not found, respond ❌ Unverified + risk explanation + recommend contacting NAFDAC.
-"""
-
-        try:
-           # Simulated AI logic (no OpenAI API required)
-           if match.empty:
-            result = "❌ Unverified — Drug not found in database. This may indicate a counterfeit or unregistered drug. Please contact NAFDAC for confirmation."
-            st.error(result)
-           else:
-            result = "✅ Verified — This drug matches a verified entry. Always ensure packaging is sealed and from a registered pharmacy."
-            st.success(result)
-
-            st.markdown("🧠 *AI-powered logic simulated locally for demonstration purposes*")
-
-        except Exception as e:
-            st.error(f"Error: {e}")
+        if st.button("Submit Report"):
+            try:
+                with sqlite3.connect(DATABASE_NAME) as conn:
+                    conn.execute("""
+                        INSERT INTO reports (nafdac_number, reason, contact, timestamp)
+                        VALUES (?, ?, ?, ?)
+                    """, (nafdac_input, reason, contact, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    conn.commit()
+                st.success("✅ Report submitted. Thank you for helping protect public health.")
+            except Exception as e:
+                st.error(f"❗ Could not save report: {e}")
+                st.info("Please check database permissions or try again later.")
